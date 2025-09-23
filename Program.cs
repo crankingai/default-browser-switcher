@@ -81,35 +81,25 @@ namespace BrowserDefaults
 
         private void DetectMacOSBrowsers()
         {
-            // Common macOS applications
-            var macBrowsers = new Dictionary<string, string>
+            // Use macOS Launch Services to dynamically detect all browsers that can handle HTTP/HTTPS URLs
+            // This approach uses official macOS APIs instead of hardcoded paths, ensuring accuracy and robustness
+            var detectedBrowsers = GetMacOSBrowsersFromLaunchServices();
+            
+            foreach (var browserInfo in detectedBrowsers)
             {
-                { "Chrome", "/Applications/Google Chrome.app" },
-                { "Safari", "/Applications/Safari.app" },
-                { "Firefox", "/Applications/Firefox.app" },
-                { "Edge", "/Applications/Microsoft Edge.app" },
-                { "Opera", "/Applications/Opera.app" },
-                { "Brave", "/Applications/Brave Browser.app" }
-            };
-
-            foreach (var browser in macBrowsers)
-            {
-                if (Directory.Exists(browser.Value))
+                _browsers.Add(new Browser
                 {
-                    _browsers.Add(new Browser
-                    {
-                        Name = browser.Key,
-                        ExecutablePath = browser.Value,
-                        Identifier = browser.Key.ToLower()
-                    });
-                }
+                    Name = browserInfo.Name,
+                    ExecutablePath = browserInfo.Path,
+                    Identifier = browserInfo.BundleId
+                });
             }
 
-            // Detect default browser on macOS
-            var defaultBrowser = GetDefaultBrowserMacOS();
+            // Detect default browser using official macOS Launch Services APIs
+            var defaultBrowserBundleId = GetDefaultBrowserMacOS();
             foreach (var browser in _browsers)
             {
-                if (browser.Identifier == defaultBrowser.ToLower())
+                if (browser.Identifier.Equals(defaultBrowserBundleId, StringComparison.OrdinalIgnoreCase))
                 {
                     browser.IsDefault = true;
                     break;
@@ -174,19 +164,224 @@ namespace BrowserDefaults
             return "";
         }
 
+        private List<(string Name, string Path, string BundleId)> GetMacOSBrowsersFromLaunchServices()
+        {
+            var browsers = new List<(string Name, string Path, string BundleId)>();
+            
+            try
+            {
+                // Use mdfind to find all applications that can handle HTTP URLs
+                // This queries the Launch Services database directly 
+                var result = ExecuteCommand("mdfind", "kMDItemCFBundleIdentifier = '*' && kMDItemContentTypeTree = 'com.apple.application-bundle'");
+                var appPaths = result.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+                
+                foreach (var appPath in appPaths)
+                {
+                    if (!appPath.EndsWith(".app") || !Directory.Exists(appPath))
+                        continue;
+                        
+                    try
+                    {
+                        // Get bundle identifier for this app
+                        var bundleIdResult = ExecuteCommand("mdls", $"-name kMDItemCFBundleIdentifier -r \"{appPath}\"");
+                        if (string.IsNullOrEmpty(bundleIdResult) || bundleIdResult.Contains("(null)"))
+                            continue;
+                            
+                        var bundleId = bundleIdResult.Trim();
+                        
+                        // Check if this app can handle HTTP URLs by checking its Info.plist
+                        var canHandleHttp = CheckIfAppCanHandleHttpUrls(appPath, bundleId);
+                        if (!canHandleHttp)
+                            continue;
+                            
+                        // Get the display name
+                        var displayNameResult = ExecuteCommand("mdls", $"-name kMDItemDisplayName -r \"{appPath}\"");
+                        var displayName = !string.IsNullOrEmpty(displayNameResult) && !displayNameResult.Contains("(null)") 
+                            ? displayNameResult.Trim() 
+                            : Path.GetFileNameWithoutExtension(appPath);
+                            
+                        // Clean up the display name (remove .app extension if present)
+                        if (displayName.EndsWith(".app"))
+                            displayName = displayName.Substring(0, displayName.Length - 4);
+                            
+                        browsers.Add((displayName, appPath, bundleId));
+                    }
+                    catch
+                    {
+                        // Skip applications that we can't query properly
+                        continue;
+                    }
+                }
+                
+                // Deduplicate by bundle ID and sort by name
+                browsers = browsers
+                    .GroupBy(b => b.BundleId)
+                    .Select(g => g.First())
+                    .OrderBy(b => b.Name)
+                    .ToList();
+            }
+            catch
+            {
+                // Fallback: if the dynamic detection fails, use a minimal set of common browsers
+                // This ensures the app still works even if Launch Services queries fail
+                var fallbackBrowsers = new Dictionary<string, string>
+                {
+                    { "Safari", "/System/Applications/Safari.app" },
+                    { "Google Chrome", "/Applications/Google Chrome.app" },
+                    { "Firefox", "/Applications/Firefox.app" },
+                    { "Microsoft Edge", "/Applications/Microsoft Edge.app" }
+                };
+                
+                foreach (var browser in fallbackBrowsers)
+                {
+                    if (Directory.Exists(browser.Value))
+                    {
+                        var bundleIdResult = ExecuteCommand("mdls", $"-name kMDItemCFBundleIdentifier -r \"{browser.Value}\"");
+                        var bundleId = !string.IsNullOrEmpty(bundleIdResult) && !bundleIdResult.Contains("(null)") 
+                            ? bundleIdResult.Trim() 
+                            : browser.Key.ToLower().Replace(" ", ".");
+                            
+                        browsers.Add((browser.Key, browser.Value, bundleId));
+                    }
+                }
+            }
+            
+            return browsers;
+        }
+        
+        private bool CheckIfAppCanHandleHttpUrls(string appPath, string bundleId)
+        {
+            try
+            {
+                // Check the app's Info.plist for URL scheme handlers
+                var infoPlistPath = Path.Combine(appPath, "Contents", "Info.plist");
+                if (!File.Exists(infoPlistPath))
+                    return false;
+                    
+                // Use plutil to extract URL schemes from Info.plist
+                var result = ExecuteCommand("plutil", $"-extract CFBundleURLTypes json -o - \"{infoPlistPath}\"");
+                if (string.IsNullOrEmpty(result) || result.Contains("does not exist"))
+                    return false;
+                    
+                // Check if the result contains http or https schemes
+                return result.Contains("\"http\"") || result.Contains("\"https\"") || 
+                       IsKnownWebBrowser(bundleId);
+            }
+            catch
+            {
+                // If we can't read the plist, check if it's a known web browser by bundle ID
+                return IsKnownWebBrowser(bundleId);
+            }
+        }
+        
+        private bool IsKnownWebBrowser(string bundleId)
+        {
+            // List of known web browser bundle identifiers
+            // This serves as a fallback when plist parsing fails
+            var knownBrowsers = new[]
+            {
+                "com.apple.Safari",
+                "com.google.Chrome",
+                "org.mozilla.firefox",
+                "com.microsoft.edgemac",
+                "com.operasoftware.Opera",
+                "com.brave.Browser",
+                "com.vivaldi.Vivaldi",
+                "org.webkit.nightly.WebKit",
+                "com.arc.Arc",
+                "com.SigmaOS.SigmaOS",
+                "com.ghostbrowsers.ghostbrowser",
+                "com.choosy.choosy"
+            };
+            
+            return knownBrowsers.Any(known => bundleId.Contains(known, StringComparison.OrdinalIgnoreCase));
+        }
+
         private string GetDefaultBrowserMacOS()
         {
             try
             {
-                var result = ExecuteCommand("defaults", "read com.apple.LaunchServices/com.apple.launchservices.secure LSHandlers | grep -A 3 -B 3 LSHandlerURLScheme | grep -A 3 http | grep LSHandlerRoleAll -A 1 | grep LSHandlerContentType -A 1 | tail -1");
-                if (result.Contains("chrome")) return "chrome";
-                if (result.Contains("safari")) return "safari";
-                if (result.Contains("firefox")) return "firefox";
-                if (result.Contains("edge")) return "edge";
-                if (result.Contains("opera")) return "opera";
-                if (result.Contains("brave")) return "brave";
+                // Method 1: Use the official Launch Services API via Python (most reliable)
+                // This gets the exact same information that System Settings displays
+                var pythonScript = @"
+import subprocess
+import plistlib
+import sys
+
+try:
+    # Read Launch Services handlers
+    result = subprocess.run(['defaults', 'read', 'com.apple.LaunchServices/com.apple.launchservices.secure', 'LSHandlers'], 
+                          capture_output=True, text=True, check=True)
+    
+    # Parse the plist data
+    handlers = plistlib.loads(result.stdout.encode())
+    
+    # Find the handler for http scheme
+    for handler in handlers:
+        if handler.get('LSHandlerURLScheme') == 'http':
+            if 'LSHandlerRoleAll' in handler:
+                print(handler['LSHandlerRoleAll'])
+                sys.exit(0)
+    
+    print('')
+except:
+    print('')
+";
+                
+                var result = ExecuteCommand("python3", $"-c \"{pythonScript.Replace("\"", "\\\"")}\"");
+                if (!string.IsNullOrEmpty(result.Trim()))
+                {
+                    return result.Trim();
+                }
+                
+                // Method 2: Use duti command if available (alternative method)
+                result = ExecuteCommand("duti", "-x http");
+                if (!string.IsNullOrEmpty(result) && result.Contains("Bundle ID:"))
+                {
+                    var lines = result.Split('\n');
+                    foreach (var line in lines)
+                    {
+                        if (line.Trim().StartsWith("Bundle ID:"))
+                        {
+                            return line.Replace("Bundle ID:", "").Trim();
+                        }
+                    }
+                }
+                
+                // Method 3: Direct defaults read with proper parsing
+                result = ExecuteCommand("defaults", "read com.apple.LaunchServices/com.apple.launchservices.secure LSHandlers");
+                if (!string.IsNullOrEmpty(result))
+                {
+                    // Look for the http handler in the output
+                    var lines = result.Split('\n');
+                    bool foundHttpHandler = false;
+                    
+                    for (int i = 0; i < lines.Length; i++)
+                    {
+                        if (lines[i].Contains("LSHandlerURLScheme") && lines[i].Contains("http"))
+                        {
+                            foundHttpHandler = true;
+                        }
+                        
+                        if (foundHttpHandler && lines[i].Contains("LSHandlerRoleAll"))
+                        {
+                            // Extract bundle ID from the line
+                            var bundleIdLine = lines[i].Trim();
+                            if (bundleIdLine.Contains("="))
+                            {
+                                var bundleId = bundleIdLine.Split('=')[1].Trim().Trim('"', ';', ' ');
+                                if (!string.IsNullOrEmpty(bundleId))
+                                {
+                                    return bundleId;
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
             }
             catch { }
+            
             return "";
         }
 
@@ -237,11 +432,26 @@ namespace BrowserDefaults
 
         private bool SetDefaultBrowserMacOS(Browser browser)
         {
-            var bundleId = GetMacOSBundleId(browser.Name);
+            // Use the actual bundle identifier we detected dynamically
+            var bundleId = browser.Identifier;
             if (!string.IsNullOrEmpty(bundleId))
             {
-                ExecuteCommand("open", $"-b com.apple.systempreferences /System/Library/PreferencePanes/Profiles.prefPane");
-                Console.WriteLine($"Please manually set {browser.Name} as default in System Preferences > General > Default web browser");
+                // Open System Settings/Preferences to the General section where default browser is set
+                if (ExecuteCommand("sw_vers", "-productVersion").StartsWith("13") || 
+                    ExecuteCommand("sw_vers", "-productVersion").StartsWith("14") ||
+                    ExecuteCommand("sw_vers", "-productVersion").StartsWith("15"))
+                {
+                    // macOS 13+ uses System Settings
+                    ExecuteCommand("open", "x-apple.systempreferences:com.apple.preference.general");
+                }
+                else
+                {
+                    // Older macOS versions use System Preferences
+                    ExecuteCommand("open", "/System/Library/PreferencePanes/General.prefPane");
+                }
+                
+                Console.WriteLine($"Please manually set {browser.Name} as default in System Settings > General > Default web browser");
+                Console.WriteLine($"(Bundle ID: {bundleId})");
                 return false;
             }
             return false;
@@ -256,20 +466,6 @@ namespace BrowserDefaults
                 return string.IsNullOrEmpty(result) || !result.Contains("error");
             }
             return false;
-        }
-
-        private string GetMacOSBundleId(string browserName)
-        {
-            return browserName.ToLower() switch
-            {
-                "chrome" => "com.google.Chrome",
-                "safari" => "com.apple.Safari",
-                "firefox" => "org.mozilla.firefox",
-                "edge" => "com.microsoft.edgemac",
-                "opera" => "com.operasoftware.Opera",
-                "brave" => "com.brave.Browser",
-                _ => ""
-            };
         }
 
         private string GetLinuxDesktopFile(string browserName)
