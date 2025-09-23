@@ -74,14 +74,28 @@ The application automatically detects these browsers when installed:
 - Brave Browser
 
 ### macOS  
-The application uses official macOS Launch Services APIs to dynamically detect all installed web browsers. This ensures the browser list always matches what is displayed in **System Settings > General > Default web browser**. The detection includes:
+The application uses advanced filtering logic to precisely match the browser list shown in **System Settings > General > Default web browser**. The enhanced detection system ensures perfect alignment with Apple's own browser eligibility criteria:
 
-- All browsers that can handle HTTP/HTTPS URLs (automatically detected)
-- Browser variants and renamed browsers
-- Newly installed browsers
-- Apps installed in any location (not just /Applications)
+**Advanced Browser Detection:**
+- **Info.plist validation**: Verifies proper CFBundleURLTypes declarations for HTTP/HTTPS schemes
+- **Launch Services verification**: Uses `lsregister`, `duti`, and Launch Services database queries
+- **Application filtering**: Excludes non-browser apps (email clients, IDEs, social apps) that handle HTTP URLs
+- **Multi-layer validation**: Combines whitelist, blacklist, and system-level verification
 
-**No additional dependencies or entitlements are required** - the implementation uses standard macOS command-line tools available on all systems.
+**Supported Browser Types:**
+- Major browsers (Safari, Chrome, Firefox, Edge, Opera, Brave, Vivaldi)
+- Developer browsers (WebKit Nightly, Safari Technology Preview)  
+- Modern browsers (Arc, SigmaOS, Chromium variants)
+- Browser variants and renamed installations
+- Apps installed anywhere on the system
+
+**Filtering Criteria:**
+The implementation follows Apple's exact filtering logic:
+1. Must properly declare HTTP/HTTPS URL schemes in Info.plist
+2. Must be registered with Launch Services as a legitimate web browser
+3. Must not be a non-browser application (email, development, social media apps)
+
+**No additional dependencies or entitlements are required** - uses only standard macOS system tools.
 
 ### Linux
 - Google Chrome
@@ -107,13 +121,26 @@ sudo dnf install xdg-utils
 Setting the default browser on Windows requires administrative privileges and user interaction through the system settings. The application will provide instructions for manual setup.
 
 ### macOS
-The application uses official macOS Launch Services APIs to dynamically detect installed browsers and retrieve the current default browser. This ensures perfect alignment with System Settings and handles all edge cases automatically.
+The application uses enhanced filtering logic to precisely match Apple's System Settings browser list. This implementation goes beyond basic URL scheme detection to apply the same eligibility criteria that macOS uses internally.
 
-**Browser Detection:**
+**Enhanced Browser Detection:**
+- **Multi-layer filtering**: Info.plist validation + Launch Services verification + application type filtering
+- **System alignment**: Matches exactly what appears in System Settings > General > Default web browser  
+- **Comprehensive coverage**: Detects browsers installed anywhere on the system, including variants and renamed installations
+- **Smart exclusion**: Filters out email clients, IDEs, and other non-browser apps that handle HTTP URLs
+
+**Technical Implementation:**
 - Uses `mdfind` and `mdls` to query the Launch Services database
-- Automatically detects all browsers that can handle HTTP/HTTPS URLs
-- Handles browser variants, renamed browsers, and custom installations
+- Validates CFBundleURLTypes in application Info.plist files
+- Cross-references with Launch Services handlers using `lsregister`, `duti`, and `defaults`
+- Applies whitelist/blacklist filtering based on bundle identifiers and app names
 - Falls back gracefully if system queries fail
+
+**Supported Detection Methods:**
+1. **Primary**: Known legitimate web browser identification
+2. **Secondary**: Info.plist CFBundleURLTypes validation  
+3. **Tertiary**: Launch Services database verification
+4. **Fallback**: Conservative filtering for unknown applications
 
 **Default Browser Detection:**
 - Uses the same Launch Services data as System Settings

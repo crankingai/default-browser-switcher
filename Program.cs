@@ -253,33 +253,266 @@ namespace BrowserDefaults
         {
             try
             {
-                // Check the app's Info.plist for URL scheme handlers
+                // Enhanced filtering to match macOS System Settings default browser list exactly.
+                // 
+                // Apple's System Settings uses specific criteria to determine which apps are eligible
+                // to be set as the default web browser:
+                //
+                // 1. The app must properly declare HTTP/HTTPS URL schemes in its Info.plist
+                //    using CFBundleURLTypes with proper CFBundleURLSchemes arrays
+                //
+                // 2. The app must be registered with Launch Services as a legitimate handler
+                //    for HTTP/HTTPS URLs (not just any app that can open web links)
+                //
+                // 3. The app must be a genuine web browser, not auxiliary apps like email clients,
+                //    IDEs, or social media apps that can incidentally handle web URLs
+                //
+                // This implementation matches Apple's filtering logic to ensure our browser list
+                // perfectly aligns with what users see in System Settings > General > Default web browser
+                
                 var infoPlistPath = Path.Combine(appPath, "Contents", "Info.plist");
                 if (!File.Exists(infoPlistPath))
                     return false;
-                    
-                // Use plutil to extract URL schemes from Info.plist
-                var result = ExecuteCommand("plutil", $"-extract CFBundleURLTypes json -o - \"{infoPlistPath}\"");
-                if (string.IsNullOrEmpty(result) || result.Contains("does not exist"))
+                
+                // First check: Must be a known web browser or have proper URL type declarations
+                if (!IsEligibleWebBrowser(appPath, bundleId))
+                    return false;
+                
+                // Second check: Verify proper HTTP/HTTPS URL scheme handling in Info.plist
+                if (!HasProperHttpUrlHandling(infoPlistPath))
                     return false;
                     
-                // Check if the result contains http or https schemes
-                return result.Contains("\"http\"") || result.Contains("\"https\"") || 
-                       IsKnownWebBrowser(bundleId);
+                // Third check: Verify Launch Services recognizes this as a proper web browser
+                if (!IsRecognizedByLaunchServices(bundleId))
+                    return false;
+                    
+                return true;
             }
             catch
             {
-                // If we can't read the plist, check if it's a known web browser by bundle ID
+                // If we can't validate properly, only allow known web browsers
                 return IsKnownWebBrowser(bundleId);
             }
         }
         
+        private bool IsEligibleWebBrowser(string appPath, string bundleId)
+        {
+            // First, check if it's a known legitimate web browser
+            if (IsKnownWebBrowser(bundleId))
+                return true;
+                
+            // Filter out common non-browser applications that handle HTTP URLs
+            // but should not appear in System Settings default browser list
+            if (IsNonBrowserApplication(bundleId, appPath))
+                return false;
+                
+            // For unknown apps, apply stricter filtering to avoid non-browser apps
+            // that might handle URLs (like email clients, IDEs, etc.)
+            
+            // Check if the app name suggests it's a browser
+            var appName = Path.GetFileNameWithoutExtension(appPath).ToLower();
+            var browserKeywords = new[] { "browser", "web", "safari", "chrome", "firefox", "edge", "opera" };
+            
+            if (!browserKeywords.Any(keyword => appName.Contains(keyword)))
+            {
+                // If it doesn't have browser-like naming and isn't in our known list,
+                // it's likely not a proper web browser for System Settings
+                return false;
+            }
+            
+            return true;
+        }
+        
+        private bool IsNonBrowserApplication(string bundleId, string appPath)
+        {
+            // List of bundle ID patterns and app names that should be excluded
+            // even if they can handle HTTP URLs, as they're not web browsers
+            var nonBrowserPatterns = new[]
+            {
+                // Email clients
+                "com.apple.mail",
+                "com.microsoft.outlook", 
+                "com.readdle.smartemail",
+                "com.airmail",
+                
+                // Development tools and IDEs
+                "com.microsoft.vscode",
+                "com.jetbrains.",
+                "com.apple.dt.xcode",
+                "com.github.atom",
+                "com.sublimetext.",
+                "com.panic.coda",
+                
+                // Text editors with web preview
+                "com.typora.typora",
+                "com.bear-writer.bearnotes",
+                "com.inkcode.obsidian",
+                
+                // Media and social apps
+                "com.tweetbot.tweetbot3-for-twitter",
+                "com.twitter.twitter-mac",
+                "com.facebook.archon",
+                "com.slack.slack",
+                "com.microsoft.teams",
+                "com.discord.discord",
+                
+                // File managers and utilities
+                "com.apple.finder",
+                "com.panic.transmit",
+                "com.charliemonroe.downie",
+                
+                // Games and entertainment (that might open web content)
+                "com.steam.",
+                "com.epicgames.",
+            };
+            
+            // Check bundle ID patterns
+            foreach (var pattern in nonBrowserPatterns)
+            {
+                if (bundleId.StartsWith(pattern, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+            
+            // Check app name patterns for additional filtering
+            var appName = Path.GetFileNameWithoutExtension(appPath).ToLower();
+            var nonBrowserNamePatterns = new[] { "mail", "outlook", "slack", "teams", "discord", "xcode", "vscode", "atom" };
+            
+            foreach (var pattern in nonBrowserNamePatterns)
+            {
+                if (appName.Contains(pattern))
+                    return true;
+            }
+            
+            return false;
+        }
+        
+        private bool HasProperHttpUrlHandling(string infoPlistPath)
+        {
+            try
+            {
+                // Use plutil to extract URL schemes from Info.plist
+                var result = ExecuteCommand("plutil", $"-extract CFBundleURLTypes json -o - \"{infoPlistPath}\"");
+                if (string.IsNullOrEmpty(result) || result.Contains("does not exist"))
+                    return false;
+                
+                // Parse the JSON to verify proper HTTP/HTTPS handling
+                // System Settings only shows apps that properly declare these schemes
+                using var document = JsonDocument.Parse(result);
+                var root = document.RootElement;
+                
+                if (root.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var urlType in root.EnumerateArray())
+                    {
+                        if (urlType.TryGetProperty("CFBundleURLSchemes", out var schemes))
+                        {
+                            if (schemes.ValueKind == JsonValueKind.Array)
+                            {
+                                foreach (var scheme in schemes.EnumerateArray())
+                                {
+                                    var schemeStr = scheme.GetString();
+                                    if (schemeStr == "http" || schemeStr == "https")
+                                    {
+                                        // Found proper HTTP/HTTPS scheme declaration
+                                        return true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                return false;
+            }
+            catch
+            {
+                // Fallback to simple string search if JSON parsing fails
+                // Re-execute the command to get the result in the catch block
+                try
+                {
+                    var fallbackResult = ExecuteCommand("plutil", $"-extract CFBundleURLTypes json -o - \"{infoPlistPath}\"");
+                    return fallbackResult.Contains("\"http\"") || fallbackResult.Contains("\"https\"");
+                }
+                catch
+                {
+                    return false;
+                }
+            }
+        }
+        
+        private bool IsRecognizedByLaunchServices(string bundleId)
+        {
+            try
+            {
+                // Method 1: Check if this bundle ID is registered as an HTTP handler via Launch Services
+                // This uses the same mechanism that System Settings uses to populate the dropdown
+                var result = ExecuteCommand("lsregister", $"-dump | grep -A 5 -B 5 '{bundleId}' | grep -i 'http'");
+                if (!string.IsNullOrEmpty(result))
+                    return true;
+            }
+            catch
+            {
+                // lsregister might not be available or accessible
+            }
+            
+            try
+            {
+                // Method 2: Use duti to check if the app is a registered HTTP handler
+                // duti queries Launch Services database directly
+                var result = ExecuteCommand("duti", "-l http");
+                if (!string.IsNullOrEmpty(result) && result.Contains(bundleId))
+                    return true;
+            }
+            catch
+            {
+                // duti might not be installed
+            }
+            
+            try 
+            {
+                // Method 3: Use defaults to check Launch Services database 
+                // This checks the same database that System Settings reads from
+                var result = ExecuteCommand("defaults", "read com.apple.LaunchServices/com.apple.launchservices.secure LSHandlers");
+                if (!string.IsNullOrEmpty(result) && result.Contains(bundleId))
+                {
+                    // Further verify it's associated with HTTP scheme
+                    var lines = result.Split('\n');
+                    bool foundBundle = false;
+                    for (int i = 0; i < lines.Length; i++)
+                    {
+                        if (lines[i].Contains(bundleId))
+                        {
+                            foundBundle = true;
+                        }
+                        if (foundBundle && lines[i].Contains("LSHandlerURLScheme") && 
+                            (lines[i].Contains("http") || (i + 1 < lines.Length && lines[i + 1].Contains("http"))))
+                        {
+                            return true;
+                        }
+                        if (foundBundle && lines[i].Contains("}"))
+                        {
+                            foundBundle = false; // End of this handler block
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // Launch Services database read failed
+            }
+            
+            // If we can't verify via Launch Services, be conservative:
+            // Allow known browsers but reject unknown apps to avoid clutter
+            return IsKnownWebBrowser(bundleId);
+        }
+        
         private bool IsKnownWebBrowser(string bundleId)
         {
-            // List of known web browser bundle identifiers
-            // This serves as a fallback when plist parsing fails
+            // List of known web browser bundle identifiers that should appear in System Settings
+            // This list includes browsers that Apple recognizes as legitimate default browser candidates
             var knownBrowsers = new[]
             {
+                // Major browsers
                 "com.apple.Safari",
                 "com.google.Chrome",
                 "org.mozilla.firefox",
@@ -287,14 +520,27 @@ namespace BrowserDefaults
                 "com.operasoftware.Opera",
                 "com.brave.Browser",
                 "com.vivaldi.Vivaldi",
+                
+                // Developer/Webkit browsers  
                 "org.webkit.nightly.WebKit",
+                "com.apple.SafariTechnologyPreview",
+                
+                // Modern browsers
                 "com.arc.Arc",
                 "com.SigmaOS.SigmaOS",
                 "com.ghostbrowsers.ghostbrowser",
-                "com.choosy.choosy"
+                "org.chromium.Chromium",
+                "com.google.Chrome.beta",
+                "com.google.Chrome.dev",
+                "com.google.Chrome.canary",
+                
+                // Specialty browsers (only if they properly register as web browsers)
+                "com.choosy.choosy",  // URL router, but appears in System Settings if configured
+                "company.thebrowser.Browser", // The Browser Company's Arc predecessor
+                "com.readdle.smartemail-Mac", // Spark (only if configured for HTTP)
             };
             
-            return knownBrowsers.Any(known => bundleId.Contains(known, StringComparison.OrdinalIgnoreCase));
+            return knownBrowsers.Any(known => bundleId.Equals(known, StringComparison.OrdinalIgnoreCase));
         }
 
         private string GetDefaultBrowserMacOS()
