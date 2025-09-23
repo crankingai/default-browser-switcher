@@ -432,11 +432,26 @@ except:
 
         private bool SetDefaultBrowserMacOS(Browser browser)
         {
-            var bundleId = GetMacOSBundleId(browser.Name);
+            // Use the actual bundle identifier we detected dynamically
+            var bundleId = browser.Identifier;
             if (!string.IsNullOrEmpty(bundleId))
             {
-                ExecuteCommand("open", $"-b com.apple.systempreferences /System/Library/PreferencePanes/Profiles.prefPane");
-                Console.WriteLine($"Please manually set {browser.Name} as default in System Preferences > General > Default web browser");
+                // Open System Settings/Preferences to the General section where default browser is set
+                if (ExecuteCommand("sw_vers", "-productVersion").StartsWith("13") || 
+                    ExecuteCommand("sw_vers", "-productVersion").StartsWith("14") ||
+                    ExecuteCommand("sw_vers", "-productVersion").StartsWith("15"))
+                {
+                    // macOS 13+ uses System Settings
+                    ExecuteCommand("open", "x-apple.systempreferences:com.apple.preference.general");
+                }
+                else
+                {
+                    // Older macOS versions use System Preferences
+                    ExecuteCommand("open", "/System/Library/PreferencePanes/General.prefPane");
+                }
+                
+                Console.WriteLine($"Please manually set {browser.Name} as default in System Settings > General > Default web browser");
+                Console.WriteLine($"(Bundle ID: {bundleId})");
                 return false;
             }
             return false;
@@ -451,20 +466,6 @@ except:
                 return string.IsNullOrEmpty(result) || !result.Contains("error");
             }
             return false;
-        }
-
-        private string GetMacOSBundleId(string browserName)
-        {
-            return browserName.ToLower() switch
-            {
-                "chrome" => "com.google.Chrome",
-                "safari" => "com.apple.Safari",
-                "firefox" => "org.mozilla.firefox",
-                "edge" => "com.microsoft.edgemac",
-                "opera" => "com.operasoftware.Opera",
-                "brave" => "com.brave.Browser",
-                _ => ""
-            };
         }
 
         private string GetLinuxDesktopFile(string browserName)
