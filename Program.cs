@@ -301,41 +301,41 @@ namespace BrowserDefaults
         {
             try
             {
-                // Method 1: Use the official Launch Services API via Python (most reliable)
-                // This gets the exact same information that System Settings displays
-                var pythonScript = @"
-import subprocess
-import plistlib
-import sys
-
-try:
-    # Read Launch Services handlers
-    result = subprocess.run(['defaults', 'read', 'com.apple.LaunchServices/com.apple.launchservices.secure', 'LSHandlers'], 
-                          capture_output=True, text=True, check=True)
-    
-    # Parse the plist data
-    handlers = plistlib.loads(result.stdout.encode())
-    
-    # Find the handler for http scheme
-    for handler in handlers:
-        if handler.get('LSHandlerURLScheme') == 'http':
-            if 'LSHandlerRoleAll' in handler:
-                print(handler['LSHandlerRoleAll'])
-                sys.exit(0)
-    
-    print('')
-except:
-    print('')
-";
-                
-                var result = ExecuteCommand("python3", $"-c \"{pythonScript.Replace("\"", "\\\"")}\"");
-                if (!string.IsNullOrEmpty(result.Trim()))
+                // Method 1: Use plutil to read and parse the Launch Services database directly
+                // This is more reliable than parsing raw defaults output and avoids Python dependency
+                var tempFile = Path.GetTempFileName();
+                try
                 {
-                    return result.Trim();
+                    // Export Launch Services handlers to a temporary plist file
+                    var exportResult = ExecuteCommand("defaults", $"export com.apple.LaunchServices/com.apple.launchservices.secure \"{tempFile}\"");
+                    
+                    if (File.Exists(tempFile))
+                    {
+                        // Use plutil to extract LSHandlers array in JSON format
+                        var handlersJson = ExecuteCommand("plutil", $"-extract LSHandlers json -o - \"{tempFile}\"");
+                        
+                        if (!string.IsNullOrEmpty(handlersJson) && handlersJson.Trim().StartsWith("["))
+                        {
+                            // Parse the JSON to find the HTTP handler using System.Text.Json
+                            var bundleId = ParseHttpHandlerFromJson(handlersJson);
+                            if (!string.IsNullOrEmpty(bundleId))
+                            {
+                                return bundleId;
+                            }
+                        }
+                    }
+                }
+                finally
+                {
+                    // Clean up temporary file
+                    if (File.Exists(tempFile))
+                    {
+                        File.Delete(tempFile);
+                    }
                 }
                 
                 // Method 2: Use duti command if available (alternative method)
-                result = ExecuteCommand("duti", "-x http");
+                var result = ExecuteCommand("duti", "-x http");
                 if (!string.IsNullOrEmpty(result) && result.Contains("Bundle ID:"))
                 {
                     var lines = result.Split('\n');
@@ -377,6 +377,86 @@ except:
                             }
                             break;
                         }
+                    }
+                }
+            }
+            catch { }
+            
+            return "";
+        }
+
+        private string ParseHttpHandlerFromJson(string handlersJson)
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(handlersJson);
+                var root = document.RootElement;
+                
+                if (root.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var handler in root.EnumerateArray())
+                    {
+                        if (handler.ValueKind == JsonValueKind.Object)
+                        {
+                            // Look for HTTP URL scheme handler
+                            if (handler.TryGetProperty("LSHandlerURLScheme", out var scheme) && 
+                                scheme.GetString() == "http")
+                            {
+                                // Get the bundle identifier for all roles
+                                if (handler.TryGetProperty("LSHandlerRoleAll", out var bundleIdElement))
+                                {
+                                    return bundleIdElement.GetString() ?? "";
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // If JSON parsing fails, fall back to string parsing
+                return ParseHttpHandlerFromString(handlersJson);
+            }
+            
+            return "";
+        }
+
+        private string ParseHttpHandlerFromString(string handlersJson)
+        {
+            try
+            {
+                // Simple string-based parsing as fallback
+                var lines = handlersJson.Split('\n');
+                bool inHttpHandler = false;
+                
+                for (int i = 0; i < lines.Length; i++)
+                {
+                    var line = lines[i].Trim();
+                    
+                    if (line.Contains("\"LSHandlerURLScheme\"") && line.Contains("\"http\""))
+                    {
+                        inHttpHandler = true;
+                    }
+                    else if (inHttpHandler && line.Contains("\"LSHandlerRoleAll\""))
+                    {
+                        // Extract the bundle ID from this line
+                        var colonIndex = line.IndexOf(':');
+                        if (colonIndex > 0 && colonIndex < line.Length - 1)
+                        {
+                            var bundleId = line.Substring(colonIndex + 1)
+                                .Trim()
+                                .Trim('"', ',', ' ');
+                            if (!string.IsNullOrEmpty(bundleId))
+                            {
+                                return bundleId;
+                            }
+                        }
+                        break;
+                    }
+                    else if (line.Contains("}") && inHttpHandler)
+                    {
+                        // End of this handler object
+                        inHttpHandler = false;
                     }
                 }
             }
