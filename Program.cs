@@ -319,6 +319,9 @@ namespace BrowserDefaults
     {
         static void Main(string[] args)
         {
+            // output my operating system
+            Console.WriteLine($"Operating System: {RuntimeInformation.OSDescription}");
+
             var browserManager = new BrowserManager();
             var browsers = browserManager.GetInstalledBrowsers();
 
