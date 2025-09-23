@@ -74,12 +74,14 @@ The application automatically detects these browsers when installed:
 - Brave Browser
 
 ### macOS  
-- Google Chrome
-- Safari
-- Mozilla Firefox
-- Microsoft Edge
-- Opera
-- Brave Browser
+The application uses official macOS Launch Services APIs to dynamically detect all installed web browsers. This ensures the browser list always matches what is displayed in **System Settings > General > Default web browser**. The detection includes:
+
+- All browsers that can handle HTTP/HTTPS URLs (automatically detected)
+- Browser variants and renamed browsers
+- Newly installed browsers
+- Apps installed in any location (not just /Applications)
+
+**No additional dependencies or entitlements are required** - the implementation uses standard macOS command-line tools available on all systems.
 
 ### Linux
 - Google Chrome
@@ -105,7 +107,20 @@ sudo dnf install xdg-utils
 Setting the default browser on Windows requires administrative privileges and user interaction through the system settings. The application will provide instructions for manual setup.
 
 ### macOS
-On macOS, the application will guide you to set the default browser through System Preferences.
+The application uses official macOS Launch Services APIs to dynamically detect installed browsers and retrieve the current default browser. This ensures perfect alignment with System Settings and handles all edge cases automatically.
+
+**Browser Detection:**
+- Uses `mdfind` and `mdls` to query the Launch Services database
+- Automatically detects all browsers that can handle HTTP/HTTPS URLs
+- Handles browser variants, renamed browsers, and custom installations
+- Falls back gracefully if system queries fail
+
+**Default Browser Detection:**
+- Uses the same Launch Services data as System Settings
+- Multiple fallback methods ensure reliability
+- Returns exact bundle identifiers for accurate matching
+
+**No additional setup required** - all functionality uses standard macOS system tools.
 
 ## License
 
