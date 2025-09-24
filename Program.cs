@@ -758,14 +758,181 @@ namespace BrowserDefaults
 
         private bool SetDefaultBrowserMacOS(Browser browser)
         {
-            // Use the actual bundle identifier we detected dynamically
             var bundleId = browser.Identifier;
-            if (!string.IsNullOrEmpty(bundleId))
+            if (string.IsNullOrEmpty(bundleId))
             {
-                // Open System Settings/Preferences to the General section where default browser is set
-                if (ExecuteCommand("sw_vers", "-productVersion").StartsWith("13") || 
-                    ExecuteCommand("sw_vers", "-productVersion").StartsWith("14") ||
-                    ExecuteCommand("sw_vers", "-productVersion").StartsWith("15"))
+                Console.WriteLine($"Error: Could not determine bundle identifier for {browser.Name}");
+                return false;
+            }
+
+            Console.WriteLine($"Setting {browser.Name} as default browser programmatically...");
+            
+            // Check macOS version for compatibility warnings
+            var macOSVersion = ExecuteCommand("sw_vers", "-productVersion");
+            var versionParts = macOSVersion.Split('.');
+            if (versionParts.Length > 0 && int.TryParse(versionParts[0], out int majorVersion))
+            {
+                if (majorVersion >= 13)
+                {
+                    Console.WriteLine("Note: macOS 13+ has enhanced security restrictions. Some methods may require additional permissions.");
+                }
+            }
+            
+            // Method 1: Try using duti (most reliable for programmatic setting)
+            if (TrySetDefaultBrowserWithDuti(bundleId, browser.Name))
+            {
+                return true;
+            }
+
+            // Method 2: Try using defaults command to modify Launch Services database
+            if (TrySetDefaultBrowserWithDefaults(bundleId, browser.Name))
+            {
+                return true;
+            }
+
+            // Method 3: Try using lsregister (less reliable but sometimes works)
+            if (TrySetDefaultBrowserWithLsregister(bundleId, browser.Name))
+            {
+                return true;
+            }
+
+            // Method 4: Fallback to opening System Settings (original behavior)
+            Console.WriteLine($"All programmatic methods failed. Opening System Settings for manual configuration...");
+            return FallbackToSystemSettings(browser, bundleId);
+        }
+
+        private bool TrySetDefaultBrowserWithDuti(string bundleId, string browserName)
+        {
+            try
+            {
+                Console.WriteLine("Attempting to set default browser using duti...");
+                
+                // First check if duti is available
+                var dutiCheckResult = ExecuteCommand("which", "duti");
+                if (string.IsNullOrEmpty(dutiCheckResult))
+                {
+                    Console.WriteLine("duti command not found. To install duti:");
+                    Console.WriteLine("  brew install duti");
+                    Console.WriteLine("  or download from: https://github.com/moretension/duti");
+                    return false;
+                }
+                
+                // Set default handler for http and https URLs
+                var httpResult = ExecuteCommand("duti", $"-s {bundleId} http all");
+                var httpsResult = ExecuteCommand("duti", $"-s {bundleId} https all");
+                
+                // Also set for public.html content type for completeness
+                var htmlResult = ExecuteCommand("duti", $"-s {bundleId} public.html all");
+                
+                // Verify the setting was applied
+                var verifyResult = ExecuteCommand("duti", "-x http");
+                if (!string.IsNullOrEmpty(verifyResult) && verifyResult.Contains(bundleId))
+                {
+                    Console.WriteLine($"✓ Successfully set {browserName} as default browser using duti");
+                    Console.WriteLine("Note: You may need to restart applications for the change to take full effect");
+                    return true;
+                }
+                else
+                {
+                    Console.WriteLine("duti command executed but verification failed");
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"duti method failed: {ex.Message}");
+                return false;
+            }
+        }
+
+        private bool TrySetDefaultBrowserWithDefaults(string bundleId, string browserName)
+        {
+            try
+            {
+                Console.WriteLine("Attempting to set default browser using defaults command...");
+                
+                // Create a new handler entry for http
+                var httpHandler = $"{{LSHandlerContentType=\"public.html\";LSHandlerRoleAll=\"{bundleId}\";}}";
+                var httpUrlHandler = $"{{LSHandlerURLScheme=\"http\";LSHandlerRoleAll=\"{bundleId}\";}}";
+                var httpsUrlHandler = $"{{LSHandlerURLScheme=\"https\";LSHandlerRoleAll=\"{bundleId}\";}}";
+                
+                // Try to add handlers to Launch Services database
+                var addHttpResult = ExecuteCommand("defaults", $"write com.apple.LaunchServices/com.apple.launchservices.secure LSHandlers -array-add '{httpUrlHandler}'");
+                var addHttpsResult = ExecuteCommand("defaults", $"write com.apple.LaunchServices/com.apple.launchservices.secure LSHandlers -array-add '{httpsUrlHandler}'");
+                
+                // Force Launch Services to refresh its database
+                var refreshResult = ExecuteCommand("/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister", "-kill -r -domain local -domain system -domain user");
+                
+                // Wait a moment for the system to process the changes
+                System.Threading.Thread.Sleep(2000);
+                
+                // Verify the setting
+                var currentDefault = GetDefaultBrowserMacOS();
+                if (bundleId.Equals(currentDefault, StringComparison.OrdinalIgnoreCase))
+                {
+                    Console.WriteLine($"✓ Successfully set {browserName} as default browser using defaults command");
+                    Console.WriteLine("Note: Changes may require a logout/login or system restart to fully take effect");
+                    return true;
+                }
+                else
+                {
+                    Console.WriteLine("defaults command executed but verification failed");
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"defaults method failed: {ex.Message}");
+                return false;
+            }
+        }
+
+        private bool TrySetDefaultBrowserWithLsregister(string bundleId, string browserName)
+        {
+            try
+            {
+                Console.WriteLine("Attempting to set default browser using lsregister...");
+                
+                // Find the application path using the bundle ID
+                var appPath = ExecuteCommand("mdfind", $"kMDItemCFBundleIdentifier == '{bundleId}'");
+                if (string.IsNullOrEmpty(appPath))
+                {
+                    Console.WriteLine("Could not find application path for lsregister");
+                    return false;
+                }
+                
+                var firstAppPath = appPath.Split('\n').FirstOrDefault()?.Trim();
+                if (string.IsNullOrEmpty(firstAppPath) || !Directory.Exists(firstAppPath))
+                {
+                    Console.WriteLine("Invalid application path for lsregister");
+                    return false;
+                }
+                
+                // Reset Launch Services database and re-register the app
+                var resetResult = ExecuteCommand("/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister", $"-u \"{firstAppPath}\"");
+                var registerResult = ExecuteCommand("/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister", $"\"{firstAppPath}\"");
+                
+                // This method is less reliable for setting defaults directly,
+                // but can help ensure the app is properly registered
+                Console.WriteLine("lsregister method completed app registration");
+                return false; // Don't claim success as this method doesn't directly set defaults
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"lsregister method failed: {ex.Message}");
+                return false;
+            }
+        }
+
+        private bool FallbackToSystemSettings(Browser browser, string bundleId)
+        {
+            try
+            {
+                Console.WriteLine("Opening System Settings for manual configuration...");
+                
+                // Check macOS version to determine correct Settings app
+                var versionResult = ExecuteCommand("sw_vers", "-productVersion");
+                if (versionResult.StartsWith("13") || versionResult.StartsWith("14") || versionResult.StartsWith("15"))
                 {
                     // macOS 13+ uses System Settings
                     ExecuteCommand("open", "x-apple.systempreferences:com.apple.preference.general");
@@ -778,9 +945,28 @@ namespace BrowserDefaults
                 
                 Console.WriteLine($"Please manually set {browser.Name} as default in System Settings > General > Default web browser");
                 Console.WriteLine($"(Bundle ID: {bundleId})");
+                Console.WriteLine();
+                
+                // Provide helpful troubleshooting information
+                Console.WriteLine("Programmatic setting failed. Possible reasons:");
+                Console.WriteLine("  • System Integrity Protection (SIP) restrictions");
+                Console.WriteLine("  • Insufficient permissions or macOS security policies");
+                Console.WriteLine("  • Missing command-line tools (install: brew install duti)");
+                Console.WriteLine("  • App not properly registered with Launch Services");
+                Console.WriteLine();
+                Console.WriteLine("To improve programmatic setting success:");
+                Console.WriteLine("  1. Install duti: brew install duti");
+                Console.WriteLine("  2. Ensure the browser app is in /Applications/");
+                Console.WriteLine("  3. Run with admin privileges if necessary");
+                Console.WriteLine("  4. Try logging out and back in after setting");
+                
+                return false; // Return false since we couldn't set it programmatically
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error opening System Settings: {ex.Message}");
                 return false;
             }
-            return false;
         }
 
         private bool SetDefaultBrowserLinux(Browser browser)
@@ -913,11 +1099,16 @@ namespace BrowserDefaults
             
             if (browserManager.SetDefaultBrowser(browser))
             {
-                Console.WriteLine($"{browser.Name} has been set as the default browser.");
+                Console.WriteLine($"✓ {browser.Name} has been set as the default browser.");
             }
             else
             {
-                if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+                if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+                {
+                    Console.WriteLine($"⚠ Programmatic setting failed, but System Settings should now be open for manual configuration.");
+                    Console.WriteLine("Please select your preferred browser in the System Settings window that opened.");
+                }
+                else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
                 {
                     Console.WriteLine($"Attempted to set {browser.Name} as default browser.");
                     Console.WriteLine("If this didn't work, you may need to:");
