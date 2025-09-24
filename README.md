@@ -8,6 +8,8 @@ A cross-platform .NET console application called `brodef` (short for "browser de
 - **Interactive mode**: Run without arguments to see a numbered list of installed browsers
 - **Direct mode**: Pass a number to immediately set a browser as default
 - **Smart detection**: Automatically detects installed browsers and shows which is currently default
+- **Programmatic setting**: Automatically sets default browser on macOS without manual interaction (NEW!)
+- **Multiple fallback methods**: Ensures compatibility even with system restrictions
 
 ## Usage
 
@@ -121,7 +123,27 @@ sudo dnf install xdg-utils
 Setting the default browser on Windows requires administrative privileges and user interaction through the system settings. The application will provide instructions for manual setup.
 
 ### macOS
-The application uses enhanced filtering logic to precisely match Apple's System Settings browser list. This implementation goes beyond basic URL scheme detection to apply the same eligibility criteria that macOS uses internally.
+The application now **automatically sets the default browser programmatically** without requiring manual interaction with System Settings. Multiple methods are attempted for maximum compatibility:
+
+**Programmatic Setting Methods:**
+1. **Primary**: `duti` command-line tool (most reliable)
+2. **Secondary**: Direct Launch Services database modification using `defaults`
+3. **Tertiary**: Launch Services registration using `lsregister`
+4. **Fallback**: System Settings (if all programmatic methods fail)
+
+**Installation Requirements:**
+For best results, install `duti` using Homebrew:
+```bash
+brew install duti
+```
+If `duti` is not available, the application will attempt alternative methods and fall back to opening System Settings if needed.
+
+**Programmatic Features:**
+- ✅ **Fully automated**: No user interaction required in most cases
+- ✅ **Multiple fallback methods**: Ensures compatibility across macOS versions
+- ✅ **Verification**: Confirms successful setting and provides feedback
+- ✅ **Error handling**: Clear messaging about system restrictions or missing tools
+- ✅ **Compatibility**: Works with System Integrity Protection (SIP) and modern macOS security
 
 **Enhanced Browser Detection:**
 - **Multi-layer filtering**: Info.plist validation + Launch Services verification + application type filtering
